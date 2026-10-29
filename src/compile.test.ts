@@ -21,6 +21,135 @@ import { compileToMingo, compileLeafClauses, evaluateOperatorTest, RULES_CONTEXT
 import { evaluateDataCondition } from './matcher';
 import { RulesEngine } from './engine';
 import type { DataCondition } from './types';
+import { OPERATOR_KEYS, isOperatorTest, type OperatorTest } from './operators';
+
+/** Exercise both public execution paths against an independently expected result. */
+function expectLeaf(test: OperatorTest, value: unknown, expected: boolean): void {
+  expect(evaluateOperatorTest(test, value)).toBe(expected);
+  const when = { value: test };
+  expect(evaluateDataCondition(when, { value })).toBe(expected);
+  expect(new Query(compileToMingo(when), { context: RULES_CONTEXT } as never).test({ value } as never)).toBe(expected);
+}
+
+it('rules events reuse R-5 preserves default exact comparison behavior', () => {
+  const cases: [OperatorTest, unknown, boolean][] = [
+    [{ equals: 'Bug' }, ' bug ', false], [{ equals: 2 }, '2', false],
+    [{ equals: null }, undefined, true], [{ equals: 'a' }, ['a', 'b'], true],
+    [{ equals: { a: 1 } }, { a: 1 }, true], [{ notEquals: 'a' }, 'b', true],
+    [{ in: ['a'] }, 'a', true], [{ notIn: ['a'] }, 'a', false],
+    [{ exists: false }, null, true], [{ truthy: false }, '', true],
+    [{ gt: 2 }, 3, true], [{ gte: 2 }, 2, true], [{ lt: 2 }, 2, false], [{ lte: 2 }, 2, true],
+    [{ startsWith: 'A' }, 'abc', false], [{ endsWith: 'c' }, 'abc', true], [{ matches: '^a' }, 'abc', true],
+  ];
+  for (const [test, value, expected] of cases) {
+    expectLeaf(test, value, expected);
+    expectLeaf({ ...test, as: 'exact' }, value, expected);
+  }
+  expect(isOperatorTest({ as: 'text' })).toBe(false);
+  expect(isOperatorTest({ as: 'text', equals: 'x' })).toBe(true);
+  expect(isOperatorTest({ as: 'text', equals: 'x', typo: true })).toBe(false);
+});
+
+it('rules events reuse R-34 compares trimmed case-folded scalar text including numbers and booleans', () => {
+  for (const [expected, value] of [['bug', ' Bug '], ['42', 42], [true, ' TRUE '], [false, false]] as const) {
+    expectLeaf({ as: 'text', equals: expected }, value, true);
+    expectLeaf({ as: 'text', notEquals: expected }, value, false);
+  }
+  expectLeaf({ as: 'text', equals: 'feature' }, 'bug', false);
+  for (const value of [null, undefined, {}, [], NaN, Infinity]) expectLeaf({ as: 'text', notEquals: 'bug' }, value, false);
+});
+
+it('rules events reuse R-35 compares finite numeric coercions', () => {
+  for (const [test, value, expected] of [
+    [{ equals: 2 }, ' 2 ', true], [{ notEquals: '2' }, 3, true],
+    [{ in: ['2', 3] }, 2, true], [{ notIn: ['2', 3] }, '2', false],
+    [{ gt: '2' }, '3', true], [{ gte: '2' }, 2, true], [{ lt: 3 }, '2', true], [{ lte: '2' }, 2, true],
+    [{ equals: true }, '1', true], [{ truthy: false }, '0', true], [{ equals: 0 }, '', true],
+  ] as [OperatorTest, unknown, boolean][]) expectLeaf({ ...test, as: 'number' }, value, expected);
+});
+
+it('rules events reuse R-35 invalid runtime numeric facts fail closed including negated comparisons', () => {
+  for (const value of ['not-a-number', 'Infinity', NaN, Infinity, null, undefined, {}, [], [1]]) {
+    for (const test of [{ equals: 2 }, { notEquals: 2 }, { in: [2] }, { notIn: [2] }, { gt: 0 }, { lte: 0 }, { truthy: false }]) {
+      expectLeaf({ ...test, as: 'number' }, value, false);
+    }
+    expectLeaf({ as: 'number', notContainsItem: 2 }, [1, value], false);
+  }
+});
+
+const noon = '2026-10-28T12:00:00Z';
+const sameNoon = '2026-10-28T08:00:00-04:00';
+it('rules events reuse R-36 compares offset-bearing ISO values as instants', () => {
+  for (const test of [{ equals: noon }, { in: [noon] }, { gte: noon, lte: noon }]) expectLeaf({ ...test, as: 'time' }, sameNoon, true);
+  for (const test of [{ notEquals: noon }, { notIn: [noon] }, { gt: noon }, { lt: noon }]) expectLeaf({ ...test, as: 'time' }, sameNoon, false);
+  expectLeaf({ as: 'time', gt: noon }, '2026-10-28T13:00:00Z', true);
+  expectLeaf({ as: 'time', lt: noon }, '2026-10-28T10:00:00Z', true);
+});
+
+it('rules events reuse R-36 invalid runtime timestamps fail closed including negated comparisons', () => {
+  for (const value of ['2026-10-28T12:00:00', '2026-02-30T00:00:00Z', 'not-time', '', 0, null, undefined, {}, [], new Date(noon)]) {
+    for (const test of [{ equals: noon }, { notEquals: noon }, { in: [noon] }, { notIn: [noon] }, { gt: noon }, { lte: noon }]) {
+      expectLeaf({ ...test, as: 'time' }, value, false);
+    }
+    expectLeaf({ as: 'time', notContainsItem: noon }, [sameNoon, value], false);
+  }
+});
+
+it('rules events reuse R-37 applies the selected mode to every applicable operator in a leaf', () => {
+  expectLeaf({ as: 'text', equals: ' BUG ', notEquals: 'feature', in: [' Bug'], notIn: ['Feature'], gt: 'aaa', gte: 'BUG', lt: 'zzz', lte: 'bug', startsWith: ' B ', endsWith: ' G ', containsText: ' U ', notContainsText: 'x', contains: 'U', notContains: 'x', matches: '^BUG$', exists: true, truthy: true }, ' Bug ', true);
+  expectLeaf({ as: 'text', equals: 'bug', notEquals: 'BUG' }, 'Bug', false);
+  expectLeaf({ as: 'text', matches: '^\\D+$' }, ' BUG ', true); // regex syntax is not case-folded
+  expectLeaf({ as: 'text', startsWith: 1, endsWith: 3 }, 123, true);
+  expectLeaf({ as: 'number', equals: '2', in: ['2'], notIn: [3], gte: '2', lt: '3', exists: true, truthy: true }, '2', true);
+  expectLeaf({ as: 'time', equals: noon, in: [sameNoon], notIn: ['2026-10-27T00:00:00Z'], gte: sameNoon, lte: noon }, sameNoon, true);
+  // Presence is structural; truthiness is evaluated on the mode's scalar reading.
+  expectLeaf({ as: 'number', exists: false }, undefined, true);
+  expectLeaf({ as: 'text', truthy: false }, '   ', true);
+});
+
+it('rules events reuse R-38 matches list members without scalar substring matching', () => {
+  expectLeaf({ containsItem: { a: 1 } }, [{ a: 1 }], true);
+  expectLeaf({ notContainsItem: 'x' }, ['y'], true);
+  expectLeaf({ containsItem: 'x' }, ['xx'], false);
+  for (const value of ['x', 'xx', 42, null, undefined, {}]) {
+    expectLeaf({ containsItem: 'x' }, value, false);
+    expectLeaf({ notContainsItem: 'x' }, value, false);
+  }
+  expectLeaf({ as: 'text', containsItem: ' BUG ', notContainsItem: 'feature' }, ['bug', ' Other '], true);
+  expectLeaf({ as: 'number', containsItem: 2, notContainsItem: 3 }, ['2', true], true);
+  expectLeaf({ as: 'time', containsItem: noon, notContainsItem: '2026-10-27T00:00:00Z' }, [sameNoon], true);
+});
+
+it('rules events reuse R-39 matches scalar substrings without list membership matching', () => {
+  expectLeaf({ containsText: 'ell', notContainsText: 'z' }, 'hello', true);
+  expectLeaf({ notContainsText: 'ell' }, 'hello', false);
+  for (const value of [['ell'], 123, null, undefined, {}]) {
+    expectLeaf({ containsText: 'ell' }, value, false);
+    expectLeaf({ notContainsText: 'ell' }, value, false);
+  }
+  expectLeaf({ as: 'text', containsText: ' ELL ', notContainsText: 'ZZ' }, ' HELLO ', true);
+  expectLeaf({ as: 'text', containsText: 23 }, 1234, true);
+  expectLeaf({ as: 'text', containsText: 'ell' }, ['ell'], false);
+});
+
+it('rules events reuse R-40 preserves legacy positive and negative list-or-substring containment', () => {
+  for (const [value, expected] of [[['x'], true], ['xyz', true], ['X', false], [42, false], [null, false], [undefined, false]] as [unknown, boolean][]) {
+    expectLeaf({ contains: 'x' }, value, expected);
+    expectLeaf({ notContains: 'x' }, value, !expected);
+    expectLeaf({ as: 'exact', contains: 'x' }, value, expected);
+  }
+  expectLeaf({ contains: 2 }, '123', true); // prior String(member) behavior
+  expectLeaf({ contains: { a: 1 } }, [{ a: 1 }], true);
+  expectLeaf({ as: 'number', contains: 2, notContains: 3 }, ['2'], true);
+  expectLeaf({ as: 'time', contains: noon }, [sameNoon], true);
+});
+
+it('rules events reuse R-43 expresses time ordering through relational operators only', () => {
+  expect(OPERATOR_KEYS).not.toContain('after');
+  expect(OPERATOR_KEYS).not.toContain('before');
+  expect(isOperatorTest({ as: 'time', after: noon })).toBe(false);
+  expectLeaf({ as: 'time', gt: '2026-10-28T11:00:00Z', gte: noon, lt: '2026-10-28T13:00:00Z', lte: noon }, sameNoon, true);
+});
 
 /* ───────────────────────── compileToMingo — vocabulary map (D-002) ───────────────────────── */
 

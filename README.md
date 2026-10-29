@@ -42,6 +42,49 @@ curated, `$`-free): `equals`, `notEquals`, `exists`, `truthy`, `in`, `notIn`,
 (recognised only as the sole key) nest arbitrarily. For anything the data-matcher
 can't express, `when` may be a plain `(event) => boolean` predicate.
 
+### Comparison modes and containment
+
+Choose a leaf-level `as`: `exact` (the default), `text`, `number`, or `time`.
+It applies to every applicable operator in that leaf, on both sides:
+
+```ts
+when: {
+  kind: { as: 'text', equals: ' Bug ' },
+  priority: { as: 'number', gte: '2', lt: 5 },
+  updatedAt: { as: 'time', gt: '2026-10-28T12:00:00-04:00' },
+  labels: { as: 'text', containsItem: 'urgent', notContainsItem: 'blocked' },
+  title: { as: 'text', containsText: 'fix', notContainsText: 'wontfix' },
+}
+```
+
+| Mode | Reading |
+| --- | --- |
+| `exact` / omitted | Existing mingo semantics, without coercion. |
+| `text` | Strings trimmed and lowercased; finite numbers and booleans read as text. |
+| `number` | Finite `Number(value)` from strings, finite numbers and booleans; empty text reads as zero. |
+| `time` | Valid ISO-8601 datetime strings with `Z` or an explicit offset, read as epoch instants. Local datetimes and invalid calendar dates are rejected. |
+
+`equals`/`notEquals`, `in`/`notIn`, `gt`/`gte`/`lt`/`lte`, and list
+containment support every mode. `in` normalizes each authored candidate; list
+containment normalizes each actual member. Non-exact readings reject objects,
+arrays as scalars, null, undefined and nonfinite numbers. Unreadable authored
+operands are rejected by `validateRuleShape`, `operatorTestSchema` and recursive
+serializable-rule parsing. Unreadable runtime values return false, including
+negated operators. A list containing an unreadable member fails closed too.
+
+`containsItem` / `notContainsItem` require a list; `containsText` /
+`notContainsText` require a string (or a readable scalar in text mode). A wrong
+domain returns false for either polarity. The legacy `contains` / `notContains`
+retain their list-or-substring behavior in exact mode, including stringifying
+the substring operand and complementing a non-collection. In text mode they
+normalize list members or scalar substrings; in number/time mode they use only
+the list branch. Substring operators, `startsWith`, `endsWith` and `matches`
+support exact/text modes; number/time combinations are invalid. Regex syntax
+is preserved; text mode adds case-insensitive matching to the trimmed text.
+`exists` always checks the original null/missing value; `truthy` checks the
+normalized value. `as` is metadata, never an operator by itself: `{ as: 'text' }`
+remains an ordinary object literal. No `after`/`before` vocabulary is needed.
+
 ### Evaluation is mingo-backed
 
 The authoring surface above is ours and unchanged, but each leaf test is

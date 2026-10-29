@@ -10,11 +10,15 @@
  */
 
 import { z } from 'zod';
-import { OPERATOR_KEYS } from './operators';
+import { OPERATOR_KEYS, COMPARISON_MODES, type OperatorTest } from './operators';
+import { comparisonError, conditionComparisonError } from './comparison';
+
+const comparisonScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
 
 /** A single leaf operator test — every operator optional, at least the known keys. */
 export const operatorTestSchema = z
   .object({
+    as: z.enum(COMPARISON_MODES).optional(),
     equals: z.unknown().optional(),
     notEquals: z.unknown().optional(),
     exists: z.boolean().optional(),
@@ -23,15 +27,34 @@ export const operatorTestSchema = z
     notIn: z.array(z.unknown()).optional(),
     contains: z.unknown().optional(),
     notContains: z.unknown().optional(),
-    gt: z.number().optional(),
-    gte: z.number().optional(),
-    lt: z.number().optional(),
-    lte: z.number().optional(),
+    containsItem: z.unknown().optional(),
+    notContainsItem: z.unknown().optional(),
+    containsText: comparisonScalarSchema.optional(),
+    notContainsText: comparisonScalarSchema.optional(),
+    gt: comparisonScalarSchema.optional(),
+    gte: comparisonScalarSchema.optional(),
+    lt: comparisonScalarSchema.optional(),
+    lte: comparisonScalarSchema.optional(),
     matches: z.union([z.string(), z.object({ source: z.string(), flags: z.string().optional() })]).optional(),
-    startsWith: z.string().optional(),
-    endsWith: z.string().optional(),
+    startsWith: comparisonScalarSchema.optional(),
+    endsWith: comparisonScalarSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((test, ctx) => {
+    if ('as' in test && !OPERATOR_KEYS.some((key) => key in test)) {
+      ctx.addIssue({ code: 'custom', message: 'as requires at least one operator' });
+    }
+    const error = comparisonError(test as OperatorTest);
+    if (error) ctx.addIssue({ code: 'custom', message: error });
+    if ((test.as ?? 'exact') === 'exact') {
+      for (const key of ['gt', 'gte', 'lt', 'lte'] as const) {
+        if (key in test && typeof test[key] !== 'number') ctx.addIssue({ code: 'custom', message: `${key} requires a number in exact mode` });
+      }
+      for (const key of ['startsWith', 'endsWith'] as const) {
+        if (key in test && typeof test[key] !== 'string') ctx.addIssue({ code: 'custom', message: `${key} requires a string in exact mode` });
+      }
+    }
+  });
 
 const combinatorKeys = ['all', 'any', 'some', 'not'];
 
@@ -44,6 +67,7 @@ const matchMapSchema = z
     const keys = Object.keys(map);
     return keys.length !== 1 || !combinatorKeys.includes(keys[0]);
   }, 'A sole combinator key must contain a valid recursive condition')
+  .refine((map) => conditionComparisonError(map) === null, 'Invalid comparison mode, operand or operator')
   // Refinements are not projected by Zod. Publish the equivalent constraint so
   // MCP/JSON-schema callers cannot accept what the callable Zod schema rejects.
   .meta({ not: { maxProperties: 1, anyOf: combinatorKeys.map((key) => ({ required: [key] })) } });

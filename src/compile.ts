@@ -42,6 +42,7 @@ import { Query, Context } from 'mingo';
 import * as queryOps from 'mingo/operators/query';
 import { resolve, isEqual as mingoIsEqual } from 'mingo/util';
 import { isOperatorTest, type OperatorTest } from './operators';
+import { comparisonError, readComparison, UNREADABLE } from './comparison';
 import type { DataCondition, MatchMap } from './types';
 
 /** A single mingo field-fragment, e.g. `{ $eq: 5 }` or `{ $gt: 3, $lt: 10 }`. */
@@ -77,13 +78,66 @@ const $pcContains: QueryOpFn = (selector, operand) => (doc) =>
 const $pcNotContains: QueryOpFn = (selector, operand) => (doc) =>
   !containsMember(resolve(doc as never, selector), operand);
 
+/** New containment operators require their actual domain, including negations. */
+const $pcContainsItem: QueryOpFn = (selector, operand) => (doc) => {
+  const value = resolve(doc as never, selector);
+  return Array.isArray(value) && value.some((item) => mingoIsEqual(item, operand));
+};
+const $pcNotContainsItem: QueryOpFn = (selector, operand) => (doc) => {
+  const value = resolve(doc as never, selector);
+  return Array.isArray(value) && !value.some((item) => mingoIsEqual(item, operand));
+};
+const $pcContainsText: QueryOpFn = (selector, operand) => (doc) => {
+  const value = resolve(doc as never, selector);
+  return typeof value === 'string' && typeof operand === 'string' && value.includes(operand);
+};
+const $pcNotContainsText: QueryOpFn = (selector, operand) => (doc) => {
+  const value = resolve(doc as never, selector);
+  return typeof value === 'string' && typeof operand === 'string' && !value.includes(operand);
+};
+const $pcNever: QueryOpFn = () => () => false;
+
+/** Normalize both sides per operator, then delegate comparisons to the same mingo seam. */
+const $pcAs: QueryOpFn = (selector, operand) => {
+  const test = operand as OperatorTest;
+  const mode = test.as!;
+  const predicates: ((value: unknown) => boolean)[] = [];
+  for (const key of Object.keys(test) as (keyof OperatorTest)[]) {
+    if (key === 'as') continue;
+    let expected: unknown = test[key];
+    if (key === 'in' || key === 'notIn') expected = (expected as unknown[]).map((v) => readComparison(v, mode));
+    else if (key === 'matches') {
+      // Keep regex syntax intact (lowercasing \\D would change its meaning).
+      const regex = toRegExp(expected as NonNullable<OperatorTest['matches']>);
+      expected = { source: regex.source, flags: regex.flags.includes('i') ? regex.flags : regex.flags + 'i' };
+    } else if (key !== 'exists' && key !== 'truthy') expected = readComparison(expected, mode);
+    const matcher = buildLeafMatcher({ [key]: expected });
+    predicates.push((value) => {
+      if (key === 'exists') return matcher(value);
+      let actual: unknown;
+      if (['containsItem', 'notContainsItem', 'contains', 'notContains'].includes(key) && Array.isArray(value)) {
+        actual = value.map((v) => readComparison(v, mode));
+        if ((actual as unknown[]).includes(UNREADABLE)) return false;
+      } else {
+        if (key === 'containsItem' || key === 'notContainsItem') return false;
+        // Numeric/time containment has only a meaningful list branch.
+        if ((key === 'contains' || key === 'notContains') && mode !== 'text') return false;
+        actual = readComparison(value, mode);
+        if (actual === UNREADABLE) return false;
+      }
+      return matcher(actual);
+    });
+  }
+  return (doc) => predicates.every((predicate) => predicate(resolve(doc as never, selector)));
+};
+
 /**
  * The mingo evaluation context: every built-in query operator PLUS our three
  * custom ops. Built once at module load. (mingo's default context is empty
  * unless seeded, so we seed it with the full built-in query-op set.)
  */
 export const RULES_CONTEXT = Context.init({
-  query: { ...queryOps, $pcTruthy, $pcContains, $pcNotContains },
+  query: { ...queryOps, $pcTruthy, $pcContains, $pcNotContains, $pcContainsItem, $pcNotContainsItem, $pcContainsText, $pcNotContainsText, $pcAs, $pcNever },
 } as never);
 
 /* ───────────────────────── regex helpers ───────────────────────── */
@@ -117,6 +171,8 @@ function toRegExp(spec: string | { source: string; flags?: string }): RegExp {
 export function compileLeafClauses(test: unknown): MingoFragment[] {
   if (!isOperatorTest(test)) return [{ $eq: test }];
   const t = test as OperatorTest;
+  if (comparisonError(t)) return [{ $pcNever: true }];
+  if (t.as !== undefined && t.as !== 'exact') return [{ $pcAs: t }];
   const out: MingoFragment[] = [];
 
   if ('equals' in t) out.push({ $eq: t.equals });
@@ -130,6 +186,10 @@ export function compileLeafClauses(test: unknown): MingoFragment[] {
   if ('notIn' in t) out.push({ $nin: t.notIn ?? [] });
   if ('contains' in t) out.push({ $pcContains: t.contains });
   if ('notContains' in t) out.push({ $pcNotContains: t.notContains });
+  if ('containsItem' in t) out.push({ $pcContainsItem: t.containsItem });
+  if ('notContainsItem' in t) out.push({ $pcNotContainsItem: t.notContainsItem });
+  if ('containsText' in t) out.push({ $pcContainsText: t.containsText });
+  if ('notContainsText' in t) out.push({ $pcNotContainsText: t.notContainsText });
 
   // Numeric comparisons share one fragment (distinct `$`-keys, no collision).
   const cmp: MingoFragment = {};
@@ -140,8 +200,8 @@ export function compileLeafClauses(test: unknown): MingoFragment[] {
   if (Object.keys(cmp).length) out.push(cmp);
 
   if ('matches' in t && t.matches !== undefined) out.push({ $regex: toRegExp(t.matches) });
-  if ('startsWith' in t && t.startsWith !== undefined) out.push({ $regex: new RegExp('^' + escapeRegExp(t.startsWith)) });
-  if ('endsWith' in t && t.endsWith !== undefined) out.push({ $regex: new RegExp(escapeRegExp(t.endsWith) + '$') });
+  if ('startsWith' in t && t.startsWith !== undefined) out.push({ $regex: new RegExp('^' + escapeRegExp(t.startsWith as string)) });
+  if ('endsWith' in t && t.endsWith !== undefined) out.push({ $regex: new RegExp(escapeRegExp(t.endsWith as string) + '$') });
 
   return out;
 }

@@ -32,6 +32,10 @@ export const OPERATOR_KEYS = [
   'notIn',
   'contains',
   'notContains',
+  'containsItem',
+  'notContainsItem',
+  'containsText',
+  'notContainsText',
   'gt',
   'gte',
   'lt',
@@ -42,8 +46,13 @@ export const OPERATOR_KEYS = [
 ] as const;
 
 export type OperatorKey = (typeof OPERATOR_KEYS)[number];
+export const COMPARISON_MODES = ['exact', 'text', 'number', 'time'] as const;
+export type ComparisonMode = (typeof COMPARISON_MODES)[number];
+export type ComparisonScalar = string | number | boolean;
 
 export interface OperatorTest {
+  /** How comparison values are read. Omitted means exact (legacy semantics). */
+  as?: ComparisonMode;
   /** Deep-equals the expected value. */
   equals?: unknown;
   /** Does NOT deep-equal the expected value. */
@@ -60,20 +69,26 @@ export interface OperatorTest {
   contains?: unknown;
   /** negation of `contains`. */
   notContains?: unknown;
+  /** List membership only (deep equality in exact mode). */
+  containsItem?: unknown;
+  notContainsItem?: unknown;
+  /** Substring only; never matches an array. */
+  containsText?: ComparisonScalar;
+  notContainsText?: ComparisonScalar;
   /** numeric value > expected. */
-  gt?: number;
+  gt?: ComparisonScalar;
   /** numeric value >= expected. */
-  gte?: number;
+  gte?: ComparisonScalar;
   /** numeric value < expected. */
-  lt?: number;
+  lt?: ComparisonScalar;
   /** numeric value <= expected. */
-  lte?: number;
+  lte?: ComparisonScalar;
   /** String(value) matches the regex (string source, or `{ source, flags }`). */
   matches?: string | { source: string; flags?: string };
   /** String(value) starts with the prefix. */
-  startsWith?: string;
+  startsWith?: ComparisonScalar;
   /** String(value) ends with the suffix. */
-  endsWith?: string;
+  endsWith?: ComparisonScalar;
 }
 
 const OPERATOR_KEY_SET: ReadonlySet<string> = new Set(OPERATOR_KEYS);
@@ -95,5 +110,5 @@ export function isOperatorTest(x: unknown): x is OperatorTest {
   if (!isPlainObject(x)) return false;
   const keys = Object.keys(x);
   if (keys.length === 0) return false;
-  return keys.every((k) => OPERATOR_KEY_SET.has(k));
+  return keys.some((k) => OPERATOR_KEY_SET.has(k)) && keys.every((k) => k === 'as' || OPERATOR_KEY_SET.has(k));
 }

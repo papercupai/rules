@@ -5,6 +5,8 @@
  * the deep serializable-shape check lives in schema.ts.
  */
 
+import { conditionComparisonError } from './comparison';
+
 export class RuleValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -49,4 +51,6 @@ export function validateRuleShape(rule: RuleLike): void {
   if (rule.args !== undefined && typeof rule.args !== 'function' && (typeof rule.args !== 'object' || rule.args === null)) {
     throw new RuleValidationError(`rule "${rule.id}": args must be an object or a function`);
   }
+  const comparisonError = conditionComparisonError(rule.when);
+  if (comparisonError) throw new RuleValidationError(`rule "${rule.id}": ${comparisonError}`);
 }

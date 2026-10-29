@@ -10,6 +10,48 @@
  */
 import { describe, expect, it } from 'vitest';
 import { validateRuleShape, RuleValidationError } from './validate';
+import { dataConditionSchema, operatorTestSchema, parseSerializableRule } from './schema';
+import { evaluateOperatorTest } from './compile';
+
+function rejectLeaf(leaf: Record<string, unknown>): void {
+  const when = { all: [{ any: [{ some: { require: 1, of: [{ not: { value: leaf } }] } }] }] };
+  expect(() => check({ ...valid(), when })).toThrow(RuleValidationError);
+  expect(() => parseSerializableRule({ ...valid(), when })).toThrow();
+  expect(operatorTestSchema.safeParse(leaf).success).toBe(false);
+  expect(dataConditionSchema.safeParse(when).success).toBe(false);
+  expect(evaluateOperatorTest(leaf, 'anything')).toBe(false);
+}
+
+it('rules events reuse R-41 rejects authored operands unreadable in the selected mode', () => {
+  for (const value of ['NaN', 'Infinity', NaN, Infinity, null, undefined, {}, [], new Date()]) {
+    for (const op of ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'containsItem', 'notContainsItem']) rejectLeaf({ as: 'number', [op]: value });
+    for (const op of ['in', 'notIn']) rejectLeaf({ as: 'number', [op]: [1, value] });
+  }
+  for (const value of ['2026-10-28T12:00:00', '2026-02-30T12:00:00Z', 'tomorrow', 42, null, undefined, {}]) {
+    for (const op of ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'containsItem', 'notContainsItem']) rejectLeaf({ as: 'time', [op]: value });
+    rejectLeaf({ as: 'time', in: [value] });
+  }
+  for (const value of [null, undefined, {}, [], NaN]) rejectLeaf({ as: 'text', equals: value });
+  for (const leaf of [{ as: 'text', equals: 2 }, { as: 'number', gt: '2' }, { as: 'time', lte: '2026-10-28T12:00:00+04:00' }]) {
+    expect(() => check({ ...valid(), when: { value: leaf } })).not.toThrow();
+    expect(() => parseSerializableRule({ ...valid(), when: { value: leaf } })).not.toThrow();
+    expect(operatorTestSchema.safeParse(leaf).success).toBe(true);
+  }
+});
+
+it('rules events reuse R-42 rejects mode and operator combinations that cannot be interpreted', () => {
+  for (const as of ['number', 'time']) {
+    for (const op of ['containsText', 'notContainsText', 'startsWith', 'endsWith', 'matches']) rejectLeaf({ as, [op]: '2' });
+  }
+  rejectLeaf({ as: 'other', equals: 1 });
+  rejectLeaf({ as: null, equals: 1 });
+  expect(operatorTestSchema.safeParse({ as: 'text' }).success).toBe(false);
+  // An as-only map remains an ordinary object literal, never a vacuous operator test.
+  expect(dataConditionSchema.safeParse({ value: { as: 'text' } }).success).toBe(true);
+  rejectLeaf({ as: 'text', exists: 'yes' });
+  rejectLeaf({ as: 'number', truthy: 'yes' });
+  rejectLeaf({ as: 'text', matches: '[' });
+});
 
 /** Call with arbitrary input (the param type is the internal RuleLike). */
 const check = (rule: unknown) => validateRuleShape(rule as Parameters<typeof validateRuleShape>[0]);

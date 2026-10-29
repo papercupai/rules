@@ -15,8 +15,8 @@
 
 export { RulesEngine } from './engine';
 export { evaluateCondition, evaluateDataCondition } from './matcher';
-export { evaluateOperatorTest, isOperatorTest, isPlainObject, OPERATOR_KEYS } from './operators';
-export type { OperatorKey, OperatorTest } from './operators';
+export { evaluateOperatorTest, isOperatorTest, isPlainObject, OPERATOR_KEYS, COMPARISON_MODES } from './operators';
+export type { OperatorKey, OperatorTest, ComparisonMode, ComparisonScalar } from './operators';
 export { compileToMingo, compileLeafClauses } from './compile';
 export type { MingoQuery } from './compile';
 export { getPath, hasPath, splitPath } from './path';
